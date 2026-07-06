@@ -1,0 +1,21 @@
+# Build
+/dist/
+*.zip
+
+# Secrets — ne JAMAIS committer de clés Stripe
+.env
+*.key
+secrets*.php
+
+# OS / éditeurs
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# WordPress / PHP
+vendor/
+node_modules/
+
+.claude/
