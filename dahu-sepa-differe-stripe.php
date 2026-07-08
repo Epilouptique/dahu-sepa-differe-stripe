@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Dahu - Sepa Differe Stripe
  * Plugin URI:  https://github.com/Epilouptique/dahu-sepa-differe-stripe
- * Description: Automatically triggers a Stripe SEPA Direct Debit charge a configurable number of days after an order is marked "Completed", reusing the customer's already-saved mandate. The charge date can be adjusted from the order screen.
+ * Description: Déclenche automatiquement le prélèvement SEPA Stripe un nombre de jours configurable après le passage d'une commande en "Terminé", en réutilisant le mandat déjà enregistré du client. La date de déclenchement est modifiable depuis la fiche commande.
  * Version:     1.1.0
  * Author:      Hugo Vial-Jaime
  * Author URI:  mailto:hugo@vialjaime.fr
