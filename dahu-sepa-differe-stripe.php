@@ -3,7 +3,7 @@
  * Plugin Name: Dahu - Sepa Differe Stripe
  * Plugin URI:  https://github.com/Epilouptique/dahu-sepa-differe-stripe
  * Description: Déclenche automatiquement le prélèvement SEPA Stripe un nombre de jours configurable après le passage d'une commande en "Terminé", en réutilisant le mandat déjà enregistré du client. La date de déclenchement est modifiable depuis la fiche commande.
- * Version:     1.1.0
+ * Version:     1.2.0
  * Author:      Hugo Vial-Jaime
  * Author URI:  mailto:hugo@vialjaime.fr
  * License:     GPL v2 or later
@@ -24,7 +24,37 @@ if ( ! defined( 'ABSPATH' ) ) {
  * ============================================================ */
 
 // Délai en jours entre le statut "Terminé" et la confirmation Stripe.
+// ⚠️ Simple valeur de REPLI : le délai réellement appliqué est résolu par
+// annad_sepa_get_delay_days() — délai personnalisé du client (fiche utilisateur)
+// > réglage global de la passerelle (Réglages → Paiements) > cette constante.
 define( 'ANNAD_SEPA_DELAY_DAYS', 8 );
+
+// Meta utilisateur : délai de prélèvement personnalisé (en jours) pour ce client.
+// Vide = utiliser le réglage global de la passerelle.
+define( 'ANNAD_SEPA_DELAY_META', '_annad_sepa_delay_days' );
+
+/**
+ * Délai de prélèvement applicable (en jours), par ordre de priorité :
+ *   1. délai personnalisé du client (fiche utilisateur, ex. J+30 exigé par certains pros) ;
+ *   2. réglage global de la passerelle (Réglages → Paiements → Prélèvement SEPA différé) ;
+ *   3. constante ANNAD_SEPA_DELAY_DAYS en dernier recours.
+ */
+function annad_sepa_get_delay_days( $user_id = 0 ) {
+	if ( $user_id ) {
+		$custom = get_user_meta( $user_id, ANNAD_SEPA_DELAY_META, true );
+		if ( '' !== $custom && (int) $custom > 0 ) {
+			return (int) $custom;
+		}
+	}
+
+	$settings = get_option( 'woocommerce_' . ANNAD_SEPA_GATEWAY_ID . '_settings', array() );
+	$global   = is_array( $settings ) && isset( $settings['delay_days'] ) ? (int) $settings['delay_days'] : 0;
+	if ( $global > 0 ) {
+		return $global;
+	}
+
+	return ANNAD_SEPA_DELAY_DAYS;
+}
 
 // ID de notre passerelle de paiement dédiée « SEPA différé ».
 define( 'ANNAD_SEPA_GATEWAY_ID', 'annad_sepa_deferred' );
@@ -157,14 +187,15 @@ function annad_sepa_schedule_on_completed( $order_id, $order = null ) {
 		return;
 	}
 
-	$timestamp = time() + ( ANNAD_SEPA_DELAY_DAYS * DAY_IN_SECONDS );
+	$delay_days = annad_sepa_get_delay_days( $order->get_user_id() );
+	$timestamp  = time() + ( $delay_days * DAY_IN_SECONDS );
 
 	annad_sepa_schedule_at( $order, $timestamp );
 
 	$order->add_order_note( sprintf(
 		'SEPA différé : prélèvement planifié le %s (J+%d).',
 		annad_sepa_format_date( $timestamp ),
-		ANNAD_SEPA_DELAY_DAYS
+		$delay_days
 	) );
 }
 
@@ -790,7 +821,8 @@ function annad_sepa_load_gateway_class() {
 			$this->method_title       = 'Prélèvement SEPA différé';
 			$this->method_description = 'Réutilise le mandat SEPA déjà enregistré du client (via Stripe). '
 				. 'Aucun débit au checkout : le prélèvement est déclenché automatiquement '
-				. ANNAD_SEPA_DELAY_DAYS . ' jours après le passage de la commande en « Terminé ».';
+				. annad_sepa_get_delay_days() . ' jours après le passage de la commande en « Terminé » '
+				. '(délai global modifiable ci-dessous, et personnalisable par client sur sa fiche utilisateur).';
 			$this->has_fields         = false;
 
 			$this->init_form_fields();
@@ -822,6 +854,18 @@ function annad_sepa_load_gateway_class() {
 					'title'   => 'Description',
 					'type'    => 'textarea',
 					'default' => 'Vous serez prélevé via votre mandat SEPA déjà enregistré, quelques jours après l\'expédition de votre commande.',
+				),
+				'delay_days'  => array(
+					'title'             => 'Délai de prélèvement par défaut (jours)',
+					'type'              => 'number',
+					'description'       => 'Nombre de jours entre le passage de la commande en « Terminé » et le déclenchement '
+						. 'du prélèvement. Peut être personnalisé client par client depuis sa fiche utilisateur '
+						. '(Utilisateurs → section « Prélèvement SEPA différé »).',
+					'default'           => ANNAD_SEPA_DELAY_DAYS,
+					'custom_attributes' => array(
+						'min'  => 1,
+						'step' => 1,
+					),
 				),
 			);
 		}
@@ -873,7 +917,7 @@ function annad_sepa_load_gateway_class() {
 					'SEPA différé : mandat enregistré réutilisé (%s). Aucun débit au checkout — '
 					. 'le prélèvement sera programmé automatiquement au passage en « Terminé » (J+%d).',
 					$mandate['payment_method'],
-					ANNAD_SEPA_DELAY_DAYS
+					annad_sepa_get_delay_days( $order->get_user_id() )
 				)
 			);
 			$order->save();
@@ -971,6 +1015,61 @@ function annad_sepa_render_authorization_field( $user ) {
 						moyens de paiement") pour que le paiement lui soit réellement proposé —
 						cela évite qu'il bascule seul vers un IBAN non validé par vous.
 					</p>
+					<?php
+					$custom_delay = get_user_meta( $user->ID, ANNAD_SEPA_DELAY_META, true );
+					$settings_gw  = get_option( 'woocommerce_' . ANNAD_SEPA_GATEWAY_ID . '_settings', array() );
+					$global_delay = ( is_array( $settings_gw ) && (int) ( $settings_gw['delay_days'] ?? 0 ) > 0 )
+						? (int) $settings_gw['delay_days']
+						: ANNAD_SEPA_DELAY_DAYS;
+					?>
+					<p style="margin-top:15px;">
+						<strong>Délai de prélèvement pour ce client :</strong> J+
+						<input type="number" name="annad_sepa_delay_days" min="1" step="1" style="width:70px;"
+							value="<?php echo esc_attr( $custom_delay ); ?>"
+							placeholder="<?php echo esc_attr( $global_delay ); ?>">
+					</p>
+					<p class="description">
+						Laisser vide pour utiliser le délai global (actuellement J+<?php echo esc_html( $global_delay ); ?>,
+						modifiable dans Réglages → Paiements → Prélèvement SEPA différé). Renseigner un nombre
+						de jours pour ce client uniquement (ex. 30 pour les clients exigeant du J+30).
+						S'applique aux prochaines commandes ; les commandes déjà planifiées ne sont pas modifiées.
+					</p>
+					<?php if ( defined( 'ANNAD_SEPA_DEBUG' ) && ANNAD_SEPA_DEBUG ) : ?>
+						<?php
+						// Diagnostic pas-à-pas : évalue chaque condition de disponibilité de la
+						// passerelle POUR CE CLIENT, telle que la verrait la page de paiement.
+						$diag = array();
+
+						$gw_settings       = get_option( 'woocommerce_' . ANNAD_SEPA_GATEWAY_ID . '_settings', array() );
+						$diag['passerelle activée (réglages WooCommerce)'] = ( is_array( $gw_settings ) && 'yes' === ( $gw_settings['enabled'] ?? '' ) ) ? '✅ oui' : '❌ NON';
+
+						$diag['rôle non-particulier'] = array_intersect( ANNAD_SEPA_PARTICULIER_ROLES, (array) $user->roles ) ? '❌ NON (rôle particulier)' : '✅ oui (' . implode( ', ', (array) $user->roles ) . ')';
+
+						if ( $active_id ) {
+							$t = WC_Payment_Tokens::get( (int) $active_id );
+							$diag[ 'mandat actif choisi (token #' . (int) $active_id . ')' ] = $t ? '✅ trouvé' : '❌ INTROUVABLE (supprimé ?)';
+							if ( $t ) {
+								$diag['token appartient bien à ce client'] = ( (int) $t->get_user_id() === (int) $user->ID ) ? '✅ oui' : '❌ NON';
+								$diag['token "par défaut" côté client']    = $t->is_default() ? '✅ oui' : '❌ NON';
+								$diag['token est un pm_ Stripe']           = ( 0 === strpos( (string) $t->get_token(), 'pm_' ) ) ? '✅ oui (' . esc_html( $t->get_token() ) . ')' : '❌ NON (' . esc_html( $t->get_token() ) . ')';
+							}
+						} else {
+							$diag['mandat actif choisi'] = '❌ AUCUN (radio <aucun>)';
+						}
+
+						$cus = annad_sepa_resolve_customer_id( $user->ID );
+						$diag['customer Stripe (cus_) résolu'] = $cus ? '✅ ' . esc_html( $cus ) : '❌ INTROUVABLE (ni meta utilisateur, ni commande avec _stripe_customer_id)';
+
+						$mandate = annad_sepa_find_saved_mandate( $user->ID );
+						$diag['→ RÉSULTAT FINAL (mandat utilisable)'] = $mandate ? '✅ ' . esc_html( wp_json_encode( $mandate ) ) : '❌ false → la passerelle est masquée au checkout';
+						?>
+						<div style="border:1px dashed #d63638;padding:8px;margin-top:10px;font-size:12px;">
+							<strong>🔧 Diagnostic du Dahu 🐐 — disponibilité de la passerelle pour ce client</strong><br>
+							<?php foreach ( $diag as $label => $value ) : ?>
+								<?php echo esc_html( $label ); ?> : <?php echo wp_kses_post( $value ); ?><br>
+							<?php endforeach; ?>
+						</div>
+					<?php endif; ?>
 				<?php endif; ?>
 			</td>
 		</tr>
@@ -991,6 +1090,15 @@ function annad_sepa_save_authorization_field( $user_id ) {
 
 	if ( isset( $_POST['annad_sepa_active_token'] ) ) {
 		update_user_meta( $user_id, ANNAD_SEPA_ACTIVE_TOKEN_META, absint( $_POST['annad_sepa_active_token'] ) );
+	}
+
+	if ( isset( $_POST['annad_sepa_delay_days'] ) ) {
+		$delay = sanitize_text_field( wp_unslash( $_POST['annad_sepa_delay_days'] ) );
+		if ( '' === $delay || (int) $delay < 1 ) {
+			delete_user_meta( $user_id, ANNAD_SEPA_DELAY_META ); // Vide → délai global.
+		} else {
+			update_user_meta( $user_id, ANNAD_SEPA_DELAY_META, (int) $delay );
+		}
 	}
 }
 
@@ -1265,6 +1373,14 @@ function annad_sepa_account_payment_methods_footer_note() {
 	$contact = ANNAD_SEPA_CONTACT_EMAIL ? ANNAD_SEPA_CONTACT_EMAIL : get_option( 'admin_email' );
 	echo '<p style="padding-top:10px;">Pour changer d\'IBAN utilisé pour le prélèvement différé, ou en faire valider un second, '
 		. 'merci de nous contacter : <a href="mailto:' . esc_attr( $contact ) . '">' . esc_html( $contact ) . '</a>.</p>';
+
+	// N'afficher le délai qu'aux clients réellement éligibles au prélèvement différé.
+	$user_id = get_current_user_id();
+	if ( $user_id && annad_sepa_is_authorized( $user_id ) ) {
+		echo '<p>Votre prélèvement SEPA différé est déclenché <strong>'
+			. esc_html( annad_sepa_get_delay_days( $user_id ) )
+			. ' jours</strong> après l\'expédition de votre commande (comptez ensuite 2-3 jours ouvrés de délai bancaire).</p>';
+	}
 }
 
 /**
@@ -1277,8 +1393,18 @@ function annad_sepa_resolve_customer_id( $user_id ) {
 			return $val;
 		}
 	}
-	// Repli via les commandes.
-	$orders = wc_get_orders( array( 'customer_id' => $user_id, 'limit' => 10 ) );
+	// Repli via les commandes : cibler directement celles qui PORTENT la meta,
+	// et non les N dernières aveuglément — sinon une série de commandes de test
+	// (CB, annulées…) sans _stripe_customer_id suffit à faire échouer la
+	// résolution alors qu'une commande SEPA plus ancienne l'a bien.
+	$orders = wc_get_orders( array(
+		'customer_id'  => $user_id,
+		'limit'        => 1,
+		'orderby'      => 'date',
+		'order'        => 'DESC',
+		'meta_key'     => '_stripe_customer_id',
+		'meta_compare' => 'EXISTS',
+	) );
 	foreach ( $orders as $o ) {
 		$val = $o->get_meta( '_stripe_customer_id' );
 		if ( $val && 0 === strpos( (string) $val, 'cus_' ) ) {
