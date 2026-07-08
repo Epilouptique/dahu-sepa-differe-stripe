@@ -2,6 +2,9 @@
 /dist/
 *.zip
 
+# Règles internes Dahu-Concept — jamais poussées sur GitHub
+CLAUDE.md
+
 # Secrets — ne JAMAIS committer de clés Stripe
 .env
 *.key

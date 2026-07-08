@@ -1,11 +1,18 @@
 <?php
 /**
  * Plugin Name: Dahu - Sepa Differe Stripe
- * Description: Déclenche automatiquement le prélèvement SEPA Stripe 8 jours après le passage d'une commande en "Terminé". Date modifiable depuis la fiche commande.
- * Version:     1.0.0
- * Author:      Dahu-Concept
- * Requires Plugins: woocommerce
+ * Plugin URI:  https://github.com/Epilouptique/dahu-sepa-differe-stripe
+ * Description: Automatically triggers a Stripe SEPA Direct Debit charge a configurable number of days after an order is marked "Completed", reusing the customer's already-saved mandate. The charge date can be adjusted from the order screen.
+ * Version:     1.1.0
+ * Author:      Hugo Vial-Jaime
+ * Author URI:  mailto:hugo@vialjaime.fr
+ * License:     GPL v2 or later
+ * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain: dahu-sepa-differe-stripe
+ * Requires at least: 6.0
+ * Requires PHP:      7.4
+ * WC requires at least: 7.0
+ * Requires Plugins: woocommerce
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -50,6 +57,10 @@ define( 'ANNAD_SEPA_ACTIVE_TOKEN_META', '_annad_sepa_active_token_id' );
 // utiliser l'email d'administration du site ; renseigner pour une autre adresse.
 define( 'ANNAD_SEPA_NOTIFY_EMAIL', 'dahu.concept@gmail.com' ); // Temporaire, le temps des tests.
 
+// Adresse de contact affichée au client sur "Mon compte" pour toute demande de
+// changement de mandat SEPA. Laisser vide pour utiliser l'email d'administration.
+define( 'ANNAD_SEPA_CONTACT_EMAIL', '' );
+
 // Mode diagnostic : affiche les meta Stripe dans l'encart de la fiche commande.
 // À mettre à true le temps du réglage, puis repasser à false. Sans effet en production.
 define( 'ANNAD_SEPA_DEBUG', true );
@@ -58,7 +69,7 @@ define( 'ANNAD_SEPA_DEBUG', true );
 // Empêche le plugin Stripe officiel de CONFIRMER (donc débiter) le PaymentIntent
 // dès le checkout, afin que le prélèvement ne parte qu'à J+8.
 //
-// LAISSER À false TANT QUE CE N'EST PAS VALIDÉ EN MODE TEST sur annad.fr :
+// LAISSER À false TANT QUE CE N'EST PAS VALIDÉ EN MODE TEST :
 //   1. activer la constante (true),
 //   2. passer une commande SEPA test (IBAN AT611904300234573201),
 //   3. vérifier dans le dashboard Stripe que le PaymentIntent reste en
@@ -70,10 +81,32 @@ define( 'ANNAD_SEPA_DEFER_AT_CHECKOUT', false );
 
 // Secret de signature du webhook Stripe DÉDIÉ à ce plugin (whsec_...).
 // À créer dans Stripe → Developers → Webhooks → « Add endpoint » pointant vers :
-//   https://www.annad.fr/wp-json/annad-sepa/v1/webhook
+//   https://votre-site.fr/wp-json/annad-sepa/v1/webhook
 // puis copier le « Signing secret » ici. Tant que c'est vide, le webhook est inactif.
 define( 'ANNAD_SEPA_WEBHOOK_SECRET', 'whsec_QJDTBk9OyZ5M3htMDYAf7txAqZj9EQ8o' );
 
+
+/* ============================================================
+ * PAGE EXTENSIONS WORDPRESS — LIENS D'ACTION & MÉTA
+ * ============================================================ */
+
+add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), function ( $links ) {
+	$settings = '<a href="' . admin_url( 'admin.php?page=wc-settings&tab=checkout&section=' . ANNAD_SEPA_GATEWAY_ID ) . '">'
+		. __( 'Réglages', 'dahu-sepa-differe-stripe' ) . '</a>';
+	array_unshift( $links, $settings );
+	return $links;
+} );
+
+add_filter( 'plugin_row_meta', function ( $links, $file ) {
+	if ( plugin_basename( __FILE__ ) === $file ) {
+		$links = array(
+			'Par Hugo Vial-Jaime — Dahu-Concept',
+			'<a href="https://github.com/Epilouptique" target="_blank">Aller sur le site de l\'extension</a>',
+			'<a href="https://github.com/Epilouptique/dahu-sepa-differe-stripe" target="_blank">Documentation</a>',
+		);
+	}
+	return $links;
+}, 10, 2 );
 
 /* ============================================================
  * COMPATIBILITÉ HPOS
@@ -257,7 +290,7 @@ function annad_sepa_do_confirm( $order_id ) {
 		'payment_method_types' => array( 'sepa_debit' ),
 		'off_session'          => 'true',
 		'confirm'              => 'true',
-		'description'          => sprintf( 'Commande #%s — annad.fr', $order->get_order_number() ),
+		'description'          => sprintf( 'Commande #%s — %s', $order->get_order_number(), get_bloginfo( 'name' ) ),
 		'metadata'             => array(
 			'order_id'     => (string) $order->get_id(),
 			'order_number' => (string) $order->get_order_number(),
@@ -1229,8 +1262,9 @@ function annad_sepa_badge_active_mandate_js() {
 add_action( 'woocommerce_account_payment-methods_endpoint', 'annad_sepa_account_payment_methods_footer_note', 20 );
 
 function annad_sepa_account_payment_methods_footer_note() {
+	$contact = ANNAD_SEPA_CONTACT_EMAIL ? ANNAD_SEPA_CONTACT_EMAIL : get_option( 'admin_email' );
 	echo '<p style="padding-top:10px;">Pour changer d\'IBAN utilisé pour le prélèvement différé, ou en faire valider un second, '
-		. 'merci de nous contacter : <a href="mailto:direction@annad.fr">direction@annad.fr</a>.</p>';
+		. 'merci de nous contacter : <a href="mailto:' . esc_attr( $contact ) . '">' . esc_html( $contact ) . '</a>.</p>';
 }
 
 /**
