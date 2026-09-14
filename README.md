@@ -116,8 +116,6 @@ stuck in "processing".
   affected by this plugin.
 - Restored the plugin version ("Version x.y.z") at the start of the plugin row
   meta on the Plugins screen; the custom row meta was dropping it.
-- Added the plugin version to the plugin action links, before "Settings".
-
 ### 1.7.1
 - The "Charge now" button on the order screen is always available, no longer
   only in debug mode. The action itself stays protected by a capability check

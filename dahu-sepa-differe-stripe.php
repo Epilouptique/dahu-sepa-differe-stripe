@@ -159,11 +159,12 @@ function annad_sepa_plugin_version_label() {
 	return sprintf( __( 'Version %s' ), $header['Version'] );
 }
 
-// Liens d'action, avant « Désactiver » : version puis « Réglages » en tête.
+// Liens d'action, avant « Désactiver » : « Réglages » en tête. Pas de version ici :
+// elle est affichée uniquement dans la ligne méta, sous le nom du plugin.
 add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), function ( $links ) {
 	$settings = '<a href="' . admin_url( 'admin.php?page=wc-settings&tab=checkout&section=' . ANNAD_SEPA_GATEWAY_ID ) . '">'
 		. __( 'Réglages', 'dahu-sepa-differe-stripe' ) . '</a>';
-	array_unshift( $links, annad_sepa_plugin_version_label(), $settings );
+	array_unshift( $links, $settings );
 	return $links;
 } );
 
