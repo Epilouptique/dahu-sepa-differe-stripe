@@ -157,7 +157,13 @@ add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), function ( $li
 
 add_filter( 'plugin_row_meta', function ( $links, $file ) {
 	if ( plugin_basename( __FILE__ ) === $file ) {
-		$links = array(
+		// On remplace les méta par défaut de WordPress, ce qui supprimerait aussi
+		// « Version x.y.z » : on la remet en tête, lue depuis l'en-tête du fichier
+		// pour rester toujours synchronisée avec lui.
+		$header = get_file_data( __FILE__, array( 'Version' => 'Version' ) );
+		$links  = array(
+			/* translators: %s: plugin version. Chaîne du cœur WordPress, déjà traduite. */
+			sprintf( __( 'Version %s' ), $header['Version'] ),
 			'Par Hugo Vial-Jaime — Dahu-Concept',
 			'<a href="https://github.com/Epilouptique" target="_blank">Aller sur le site de l\'extension</a>',
 			'<a href="https://github.com/Epilouptique/dahu-sepa-differe-stripe" target="_blank">Documentation</a>',

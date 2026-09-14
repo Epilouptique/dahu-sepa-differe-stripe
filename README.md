@@ -114,6 +114,8 @@ stuck in "processing".
 - Removed a store-specific migration rule that hid the "Cash on delivery"
   gateway from authorized customers at checkout. Cash on delivery is no longer
   affected by this plugin.
+- Restored the plugin version ("Version x.y.z") at the start of the plugin row
+  meta on the Plugins screen; the custom row meta was dropping it.
 
 ### 1.7.1
 - The "Charge now" button on the order screen is always available, no longer

@@ -275,6 +275,16 @@ paiement et de l'affichage sur « Mon compte ».
 Reste à faire **hors de ce dépôt** : retirer de dahu-pricing le CSS qui
 restreignait l'ancien bloc SEPA aux pros — inoffensif mais devenu mort.
 
+### 5.6 Numéro de version absent de la page Extensions
+Le filtre `plugin_row_meta` **remplace** la liste des méta (format imposé
+« Par Hugo Vial-Jaime — Dahu-Concept | Aller sur le site | Documentation »).
+Or cette liste contient déjà, en première position, le « Version x.y.z » que
+WordPress tire de l'en-tête : l'écraser le faisait disparaître, alors que
+l'en-tête était correct. Corrigé en 1.7.2 en réinsérant la version en tête, lue
+via `get_file_data( __FILE__ )` pour ne jamais avoir à la maintenir à deux
+endroits. Piège à reproduire à l'identique sur les autres plugins Dahu qui
+suivent le même modèle de ligne méta.
+
 ---
 
 ## 6. Checklist de validation (mode test Stripe)
