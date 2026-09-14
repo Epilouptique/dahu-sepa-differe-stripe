@@ -11,9 +11,10 @@
 
 Certains clients professionnels paient par **prélèvement SEPA via Stripe** (mandat
 déjà signé/enregistré). Le besoin : ne plus débiter le client à la commande, mais
-**8 jours après le passage en statut « Terminé »** (le temps de l'expédition et
+**N jours après le passage en statut « Terminé »** (le temps de l'expédition et
 d'une marge de sécurité), avec possibilité de repousser cette date depuis la fiche
-commande.
+commande. N vaut 8 par défaut, mais est configurable globalement et client par
+client (cf. §3.3), certains pros ayant négocié d'autres conditions de paiement.
 
 Historiquement (contexte annad.fr), les prélèvements SEPA étaient gérés **en
 direct via la banque** (mandat papier signé, enregistrement manuel sur la
@@ -77,7 +78,7 @@ Une **passerelle de paiement WooCommerce dédiée** (`annad_sepa_deferred`) :
   validé par l'administrateur, sans bloquer l'ajout libre de plusieurs IBAN côté
   Stripe (voir §5.2 pour l'historique de cette décision).
 - Au passage de la commande en **« Terminé »**, le prélèvement réel est planifié
-  à J+`ANNAD_SEPA_DELAY_DAYS` (8 par défaut) : **Stratégie B** (nouveau
+  à J+`annad_sepa_get_delay_days( $user_id )` : **Stratégie B** (nouveau
   PaymentIntent off-session avec le customer + payment method sauvegardés), avec
   **Fallback A** (confirmation d'un PaymentIntent existant s'il est encore en
   `requires_confirmation`).
@@ -90,6 +91,58 @@ Une **passerelle de paiement WooCommerce dédiée** (`annad_sepa_deferred`) :
   faire échouer la commande — indépendant du webhook du plugin Stripe officiel
   (ne traite que les prélèvements de ce plugin, via metadata `source` ou l'ID de
   gateway).
+
+### 3.3 Résolution du délai de prélèvement
+
+Le délai n'est plus une constante figée. `annad_sepa_get_delay_days( $user_id )`
+le résout par ordre de priorité :
+
+1. **Meta utilisateur** `_annad_sepa_delay_days` (`ANNAD_SEPA_DELAY_META`) —
+   saisie sur la fiche du client, section « Prélèvement SEPA différé ». Sert aux
+   pros ayant négocié d'autres conditions de paiement (ex. J+30).
+2. **Réglage global de la passerelle** — clé `delay_days` de l'option
+   `woocommerce_annad_sepa_deferred_settings` (Réglages → Paiements).
+3. **`ANNAD_SEPA_DELAY_DAYS`** (8) — dernier recours uniquement.
+
+Le délai est résolu **au moment de la planification** (passage en « Terminé ») et
+non au checkout : modifier le réglage n'affecte donc pas les commandes déjà
+planifiées, qu'il faut replanifier une par une depuis le metabox.
+
+### 3.4 Déclenchement manuel du prélèvement
+
+Le bouton « Déclencher le prélèvement maintenant » de la fiche commande était
+initialement une sonde de debug. Depuis la 1.7.1 il est **affiché en permanence**
+(hors `ANNAD_SEPA_DEBUG`) : il sert aussi en exploitation courante, pour prélever
+un client sans attendre la date planifiée.
+
+Ce n'est pas un affaiblissement de la sécurité : l'affichage n'est qu'un lien, et
+le handler `annad_sepa_handle_run_now()` vérifie la capacité
+`edit_shop_orders` **et** un nonce par commande — ces contrôles n'ont jamais
+dépendu de `ANNAD_SEPA_DEBUG`.
+
+À savoir : le déclenchement manuel **ne désinscrit pas** la tâche Action
+Scheduler déjà planifiée. Celle-ci s'exécutera bien à la date prévue, mais ne
+fera rien — `annad_sepa_do_confirm()` sort immédiatement si la meta
+`_annad_sepa_done` vaut `yes`, et la clé d'idempotence persistante bloque de
+toute façon un second débit côté Stripe.
+
+### 3.5 Secrets et configuration par environnement
+
+`ANNAD_SEPA_WEBHOOK_SECRET`, `ANNAD_SEPA_DEBUG`, `ANNAD_SEPA_NOTIFY_EMAIL` et
+`ANNAD_SEPA_CONTACT_EMAIL` sont déclarées en `if ( ! defined( ... ) )` : elles se
+surchargent depuis `wp-config.php` sans toucher au fichier du plugin.
+
+Le secret de webhook a été retiré du code : il avait été committé en clair sur
+le dépôt public. C'était celui de l'endpoint live d'annad.fr, qui a donc été
+renouvelé côté Stripe au passage en 1.7.0 — retirer une valeur du fichier ne
+l'efface pas de l'historique Git, seul le renouvellement la révoque. **À ne
+jamais réintroduire dans le fichier versionné.** Rappel : les secrets test et live sont différents — un secret test
+laissé en place fait rejeter 100 % des notifications live, et les commandes
+restent bloquées en « processing » sans jamais passer à « payée ».
+
+Les **clés API Stripe**, elles, ne sont jamais stockées par ce plugin : elles
+sont lues dans les réglages du plugin Stripe officiel
+(`annad_sepa_get_secret_key()`, qui suit le flag `testmode`).
 
 ---
 
@@ -182,13 +235,45 @@ données interne de WooCommerce.
 Pour accélérer le débogage sur un environnement de production/staging sans accès
 SSH facile, plusieurs sondes de diagnostic sont intégrées, actives uniquement si
 `ANNAD_SEPA_DEBUG` vaut `true` :
-- Encart dans la fiche commande (meta Stripe, bouton de déclenchement manuel du
-  prélèvement sans attendre Action Scheduler).
+- Encart dans la fiche commande (meta Stripe brutes, sonde d'interception).
 - Encart réservé aux administrateurs sur la page de paiement (pourquoi la
   passerelle est ou non disponible pour l'utilisateur connecté).
 
-À désactiver en production une fois la configuration stabilisée (mais peut être
-laissé actif un temps pour usage terrain, avec le bouton de déclenchement manuel).
+La constante vaut **`false` par défaut** depuis la 1.7.0 (le bouton de
+déclenchement manuel du prélèvement ne doit pas traîner en production). Pour
+l'activer temporairement sur un site, ajouter dans `wp-config.php` :
+
+```php
+define( 'ANNAD_SEPA_DEBUG', true );
+```
+
+puis retirer la ligne une fois le diagnostic terminé — sans jamais rééditer le
+fichier du plugin.
+
+### 5.5 Transition depuis l'ancien SEPA manuel (retirée en 1.7.2)
+Contexte annad.fr : avant ce plugin, les revendeurs historiques payaient par un
+formulaire de prélèvement SEPA **manuel** (mandat papier, saisie à la banque),
+exposé au checkout via la passerelle WooCommerce **`cod`** (« paiement à la
+livraison ») détournée et renommée « Prélèvement Sepa ANCIEN SYSTEME ». Sa
+restriction aux seuls pros était assurée par du CSS dans le plugin
+**dahu-pricing**, pas par ce plugin.
+
+Pendant la migration, `annad_sepa_hide_native_sepa_gateway()` retirait `cod` du
+checkout pour tout client déjà autorisé sur le nouveau système, afin qu'il ne
+puisse plus retomber sur l'ancien circuit.
+
+Une fois l'ancien formulaire supprimé du site, ce bloc a été retiré (1.7.2) :
+- il ne faisait plus rien ;
+- il aurait **masqué silencieusement un vrai « paiement à la livraison »** aux
+  clients SEPA autorisés si `cod` était un jour réactivé pour son usage normal ;
+- il enfreignait la règle « rien de spécifique à annad.fr dans le code générique ».
+
+`annad_sepa_is_authorized()`, qu'il appelait, est **conservée** : elle reste au
+cœur de la disponibilité de la passerelle, de la vérification serveur au
+paiement et de l'affichage sur « Mon compte ».
+
+Reste à faire **hors de ce dépôt** : retirer de dahu-pricing le CSS qui
+restreignait l'ancien bloc SEPA aux pros — inoffensif mais devenu mort.
 
 ---
 
@@ -240,9 +325,22 @@ laissé actif un temps pour usage terrain, avec le bouton de déclenchement manu
 
 ### Phase 7 — Passage en production
 - [ ] Toutes les phases précédentes vertes en mode test.
-- [ ] `Stripe-Version` du code alignée sur la version du compte (ou header retiré).
-- [ ] Stripe repassé en mode live + nouvelle destination webhook live (secret
-      `whsec_` différent du mode test).
+- [x] Header `Stripe-Version` retiré du code (1.7.0) : la version d'API du compte
+      s'applique. Rien à aligner.
+- [ ] `ANNAD_SEPA_DEBUG` absent de `wp-config.php` (donc `false`).
+- [ ] Slug du rôle « particulier » vérifié sur le site
+      (`ANNAD_SEPA_PARTICULIER_ROLES`, cf. §7).
+- [ ] Ancien endpoint webhook de test supprimé côté Stripe (son secret a été
+      exposé publiquement).
+- [ ] Stripe repassé en mode live + nouvelle destination webhook live
+      (`https://<site>/wp-json/annad-sepa/v1/webhook`, 3 événements), secret
+      `whsec_` **live** reporté dans `wp-config.php`.
+- [ ] Optimized Checkout désactivé côté Stripe (cf. §4).
+- [ ] Délai global renseigné dans les réglages de la passerelle, et délais
+      personnalisés saisis pour les clients concernés.
+- [ ] Emails de pré-notification SEPA actifs (Stripe → Settings → Emails).
+- [ ] Au moins un client autorisé (mandat actif choisi sur sa fiche) — sinon la
+      passerelle n'apparaît pour personne.
 - [ ] Une vraie commande de bout en bout, petit montant, sous surveillance.
 
 ---

@@ -27,7 +27,8 @@ and rescheduled from the order screen at any time before it fires.
 - **Deferred charging** — no debit at checkout; the real SEPA charge is
   scheduled automatically N days after the order is completed.
 - **Reschedule from the order screen** — view and change the scheduled charge
-  date from a metabox on the order page.
+  date from a metabox on the order page, or charge immediately with the "Charge
+  now" button.
 - **Dedicated payment gateway** — a standalone "Deferred SEPA Direct Debit"
   gateway that only appears for customers who already have a reusable Stripe
   mandate, and only once explicitly authorized (see Configuration).
@@ -59,16 +60,32 @@ and rescheduled from the order screen at any time before it fires.
 
 ## Configuration
 
-Key constants near the top of the main plugin file:
+### Charge delay
+
+The delay between "Completed" and the actual charge is resolved in this order:
+
+1. **Per-customer delay** — *Users → (a customer) → "Deferred SEPA Direct Debit"
+   section*. Leave empty to fall back to the global setting. Useful when a given
+   B2B customer has negotiated different payment terms (e.g. net 30).
+2. **Global gateway setting** — *WooCommerce → Settings → Payments → Deferred
+   SEPA Direct Debit → "Default charge delay (days)"*.
+3. **`ANNAD_SEPA_DELAY_DAYS`** constant (`8`) — last-resort fallback only.
+
+### Constants
+
+`ANNAD_SEPA_NOTIFY_EMAIL`, `ANNAD_SEPA_CONTACT_EMAIL`, `ANNAD_SEPA_DEBUG` and
+`ANNAD_SEPA_WEBHOOK_SECRET` are only defined by the plugin if they are not
+already defined, so they can (and should) be set in `wp-config.php` instead of
+being edited into the plugin file.
 
 | Constant | Default | Purpose |
 |---|---|---|
-| `ANNAD_SEPA_DELAY_DAYS` | `8` | Number of days between "Completed" and the actual charge |
+| `ANNAD_SEPA_DELAY_DAYS` | `8` | Fallback delay, used only when neither the per-customer nor the global setting is set |
 | `ANNAD_SEPA_PARTICULIER_ROLES` | `customer` | WordPress role(s) that should never see the deferred gateway |
 | `ANNAD_SEPA_NOTIFY_EMAIL` | *(empty → site admin email)* | Notified when a customer changes their default SEPA mandate |
 | `ANNAD_SEPA_CONTACT_EMAIL` | *(empty → site admin email)* | Shown to customers as the contact address for mandate changes |
-| `ANNAD_SEPA_WEBHOOK_SECRET` | *(empty)* | Signing secret for this plugin's dedicated Stripe webhook |
-| `ANNAD_SEPA_DEBUG` | `false` | Shows diagnostic panels on the order screen and checkout for admins |
+| `ANNAD_SEPA_WEBHOOK_SECRET` | *(empty)* | Signing secret for this plugin's dedicated Stripe webhook. **Define it in `wp-config.php`, never in the plugin file** |
+| `ANNAD_SEPA_DEBUG` | `false` | Shows diagnostic panels (raw Stripe metadata, gateway availability checks) on the order screen, user profile and checkout for admins. Keep `false` in production. The "Charge now" button does not depend on it |
 
 **Authorizing a customer:** open the customer's user profile in
 **Users**, and in the "Deferred SEPA Direct Debit" section, select which saved
@@ -80,10 +97,40 @@ checkout.
 **Webhook setup:** create a webhook endpoint in your Stripe Dashboard pointing
 to `https://yoursite.com/wp-json/annad-sepa/v1/webhook`, listening for
 `payment_intent.succeeded`, `payment_intent.payment_failed`, and
-`charge.dispute.created`, then paste the signing secret into
-`ANNAD_SEPA_WEBHOOK_SECRET`.
+`charge.dispute.created`, then add its signing secret to `wp-config.php`:
+
+```php
+define( 'ANNAD_SEPA_WEBHOOK_SECRET', 'whsec_...' );
+```
+
+Test mode and live mode use **separate endpoints with different signing
+secrets** — when you switch Stripe to live mode, create a live endpoint and
+update the constant, otherwise every notification is rejected and orders stay
+stuck in "processing".
 
 ## Changelog
+
+### 1.7.2
+- Removed a store-specific migration rule that hid the "Cash on delivery"
+  gateway from authorized customers at checkout. Cash on delivery is no longer
+  affected by this plugin.
+
+### 1.7.1
+- The "Charge now" button on the order screen is always available, no longer
+  only in debug mode. The action itself stays protected by a capability check
+  and a nonce.
+
+### 1.7.0
+- The charge delay is now configurable: a global gateway setting, overridable
+  per customer from the user profile. `ANNAD_SEPA_DELAY_DAYS` is now only a
+  fallback.
+- Fixed Stripe customer id resolution when scheduling the charge.
+- `ANNAD_SEPA_WEBHOOK_SECRET`, `ANNAD_SEPA_DEBUG`, `ANNAD_SEPA_NOTIFY_EMAIL` and
+  `ANNAD_SEPA_CONTACT_EMAIL` can now be defined in `wp-config.php`; the webhook
+  secret is no longer stored in the plugin file.
+- `ANNAD_SEPA_DEBUG` now defaults to `false`.
+- Removed the pinned `Stripe-Version` request header — the account's own API
+  version is used instead.
 
 ### 1.1.0
 - Added standard plugin action links ("Settings") and plugin row meta.

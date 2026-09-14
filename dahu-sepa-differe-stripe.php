@@ -3,7 +3,7 @@
  * Plugin Name: Dahu - Sepa Differe Stripe
  * Plugin URI:  https://github.com/Epilouptique/dahu-sepa-differe-stripe
  * Description: Déclenche automatiquement le prélèvement SEPA Stripe un nombre de jours configurable après le passage d'une commande en "Terminé", en réutilisant le mandat déjà enregistré du client. La date de déclenchement est modifiable depuis la fiche commande.
- * Version:     1.2.0
+ * Version:     1.7.2
  * Author:      Hugo Vial-Jaime
  * Author URI:  mailto:hugo@vialjaime.fr
  * License:     GPL v2 or later
@@ -32,6 +32,14 @@ define( 'ANNAD_SEPA_DELAY_DAYS', 8 );
 // Meta utilisateur : délai de prélèvement personnalisé (en jours) pour ce client.
 // Vide = utiliser le réglage global de la passerelle.
 define( 'ANNAD_SEPA_DELAY_META', '_annad_sepa_delay_days' );
+
+// Meta utilisateur : ID du token SEPA "par défaut" déjà connu de ce client.
+// C'est le passage d'un IBAN en "par défaut" (automatique pour le premier ajouté,
+// via le bouton « Utiliser par défaut » ensuite) qui vaut SOUMISSION à validation
+// et déclenche les emails — pas le simple ajout d'un IBAN supplémentaire.
+// Détection par comparaison à chaque passage sur "Mes moyens de paiement" (où
+// WooCommerce redirige après ces actions), sans dépendre d'un nom de hook.
+define( 'ANNAD_SEPA_KNOWN_DEFAULT_META', '_annad_sepa_known_default_token' );
 
 /**
  * Délai de prélèvement applicable (en jours), par ordre de priorité :
@@ -82,18 +90,28 @@ define( 'ANNAD_SEPA_AUTHORIZED_META', '_annad_sepa_authorized' );
 // "actif" pour le prélèvement différé — choisi explicitement par un admin Annad.
 define( 'ANNAD_SEPA_ACTIVE_TOKEN_META', '_annad_sepa_active_token_id' );
 
-// Email prévenu quand un client remplace son mandat SEPA (RIB modifié) — à vérifier
-// manuellement, puisque le remplacement lui-même n'est pas bloqué. Laisser vide pour
-// utiliser l'email d'administration du site ; renseigner pour une autre adresse.
-define( 'ANNAD_SEPA_NOTIFY_EMAIL', 'dahu.concept@gmail.com' ); // Temporaire, le temps des tests.
+// Adresse notifiée pour tout événement SEPA côté client : ajout d'un nouvel IBAN
+// (validation requise) et remplacement de mandat. Laisser vide pour utiliser
+// l'email d'administration du site.
+// Surchargeable depuis wp-config.php :
+//   define( 'ANNAD_SEPA_NOTIFY_EMAIL', 'administration@exemple.fr' );
+if ( ! defined( 'ANNAD_SEPA_NOTIFY_EMAIL' ) ) {
+	define( 'ANNAD_SEPA_NOTIFY_EMAIL', '' );
+}
 
 // Adresse de contact affichée au client sur "Mon compte" pour toute demande de
 // changement de mandat SEPA. Laisser vide pour utiliser l'email d'administration.
-define( 'ANNAD_SEPA_CONTACT_EMAIL', '' );
+if ( ! defined( 'ANNAD_SEPA_CONTACT_EMAIL' ) ) {
+	define( 'ANNAD_SEPA_CONTACT_EMAIL', '' );
+}
 
-// Mode diagnostic : affiche les meta Stripe dans l'encart de la fiche commande.
-// À mettre à true le temps du réglage, puis repasser à false. Sans effet en production.
-define( 'ANNAD_SEPA_DEBUG', true );
+// Mode diagnostic : encarts de diagnostic sur la fiche commande et au checkout,
+// dont le bouton de déclenchement manuel du prélèvement. Doit rester à false en
+// production ; activable ponctuellement depuis wp-config.php :
+//   define( 'ANNAD_SEPA_DEBUG', true );
+if ( ! defined( 'ANNAD_SEPA_DEBUG' ) ) {
+	define( 'ANNAD_SEPA_DEBUG', false );
+}
 
 // ⚠️ Interception du checkout SEPA (voir §5.2 de la spec).
 // Empêche le plugin Stripe officiel de CONFIRMER (donc débiter) le PaymentIntent
@@ -112,8 +130,18 @@ define( 'ANNAD_SEPA_DEFER_AT_CHECKOUT', false );
 // Secret de signature du webhook Stripe DÉDIÉ à ce plugin (whsec_...).
 // À créer dans Stripe → Developers → Webhooks → « Add endpoint » pointant vers :
 //   https://votre-site.fr/wp-json/annad-sepa/v1/webhook
-// puis copier le « Signing secret » ici. Tant que c'est vide, le webhook est inactif.
-define( 'ANNAD_SEPA_WEBHOOK_SECRET', 'whsec_QJDTBk9OyZ5M3htMDYAf7txAqZj9EQ8o' );
+// puis copier le « Signing secret ».
+//
+// ⚠️ NE JAMAIS écrire le secret ici : ce fichier est versionné sur GitHub.
+// Le déclarer dans wp-config.php, AVANT « That's all, stop editing! » :
+//   define( 'ANNAD_SEPA_WEBHOOK_SECRET', 'whsec_...' );
+//
+// ⚠️ Le secret du mode test et celui du mode live sont DIFFÉRENTS : au passage en
+// production, créer une destination webhook en mode live et reporter son secret.
+// Tant que la constante est vide, le webhook est inactif.
+if ( ! defined( 'ANNAD_SEPA_WEBHOOK_SECRET' ) ) {
+	define( 'ANNAD_SEPA_WEBHOOK_SECRET', '' );
+}
 
 
 /* ============================================================
@@ -428,10 +456,11 @@ function annad_sepa_render_metabox( $post_or_order ) {
 		return;
 	}
 
+	// Une fois le prélèvement déclenché, on masque l'interface de planification
+	// mais on laisse le diagnostic visible (utile pour retrouver le pi_ notamment).
 	if ( 'yes' === $order->get_meta( '_annad_sepa_done' ) ) {
 		echo '<p>✅ Prélèvement déjà déclenché.</p>';
-		return;
-	}
+	} else {
 
 	$scheduled_ts = (int) $order->get_meta( '_annad_sepa_scheduled_ts' );
 
@@ -450,6 +479,25 @@ function annad_sepa_render_metabox( $post_or_order ) {
 	echo '<p class="description">Le prélèvement sera déclenché à 09h00 (heure de Paris) à la date choisie. Compter ensuite 2-3 jours ouvrés de délai bancaire.</p>';
 	echo '<p class="description">Laisser vide pour ne rien changer. Enregistrez la commande pour appliquer.</p>';
 
+	} // Fin de l'interface de planification (commandes non encore prélevées).
+
+	// --- Déclenchement manuel immédiat ---
+	// Volontairement disponible en permanence (et non sous ANNAD_SEPA_DEBUG) : sert
+	// aussi en exploitation courante pour prélever sans attendre Action Scheduler.
+	// L'action elle-même reste protégée par capacité + nonce (annad_sepa_handle_run_now).
+	if ( 'yes' !== $order->get_meta( '_annad_sepa_done' ) && current_user_can( 'edit_shop_orders' ) ) {
+		$run_url = wp_nonce_url(
+			admin_url( 'admin-post.php?action=annad_sepa_run_now&order_id=' . $order->get_id() ),
+			'annad_sepa_run_now_' . $order->get_id()
+		);
+		echo '<hr><p><a href="' . esc_url( $run_url ) . '" class="button button-secondary" '
+			. 'onclick="return confirm(\'Déclencher le prélèvement SEPA maintenant ? Cette action débite réellement le client.\');">'
+			. '▶ Déclencher le prélèvement maintenant</a></p>';
+		echo '<p class="description">Lance immédiatement la confirmation Stripe, sans attendre la date planifiée '
+			. '(équivaut au « Run » d\'Action Scheduler). La tâche planifiée reste en place mais ne fera rien : '
+			. 'la commande est marquée comme prélevée, et la clé d\'idempotence empêche tout second débit.</p>';
+	}
+
 	// --- Diagnostic (ANNAD_SEPA_DEBUG) : meta Stripe utiles au réglage. ---
 	if ( defined( 'ANNAD_SEPA_DEBUG' ) && ANNAD_SEPA_DEBUG ) {
 		echo '<hr><p><strong>🔧 Diagnostic du Dahu 🐐 </br> Promis je le desactiverai ensuite</strong></p>';
@@ -461,17 +509,8 @@ function annad_sepa_render_metabox( $post_or_order ) {
 		}
 		echo '</p>';
 
-		// Bouton de déclenchement manuel immédiat (test sans Action Scheduler).
-		if ( 'yes' !== $order->get_meta( '_annad_sepa_done' ) ) {
-			$run_url = wp_nonce_url(
-				admin_url( 'admin-post.php?action=annad_sepa_run_now&order_id=' . $order->get_id() ),
-				'annad_sepa_run_now_' . $order->get_id()
-			);
-			echo '<p><a href="' . esc_url( $run_url ) . '" class="button button-secondary" '
-				. 'onclick="return confirm(\'Déclencher le prélèvement SEPA maintenant ?\');">'
-				. '▶ Déclencher le prélèvement maintenant</a></p>';
-			echo '<p class="description">Test : lance immédiatement la confirmation Stripe (équivaut au « Run » d\'Action Scheduler).</p>';
-		}
+		// (Le bouton de déclenchement manuel est désormais affiché en permanence,
+		// au-dessus de ce bloc de diagnostic.)
 
 		// Résultat de la sonde d'interception (dernier filtre déclenché, tous clients confondus).
 		$probe = get_option( 'annad_sepa_probe' );
@@ -624,9 +663,11 @@ function annad_sepa_stripe_request( $method, $endpoint, $body, $secret_key, $ide
 	$args = array(
 		'method'  => $method,
 		'timeout' => 45,
+		// Pas de header Stripe-Version : Stripe applique alors la version d'API du
+		// compte, ce qui évite toute divergence entre une version figée ici et celle
+		// réellement utilisée par le plugin Stripe officiel.
 		'headers' => array(
-			'Authorization'  => 'Bearer ' . $secret_key,
-			'Stripe-Version' => '2024-06-20', // À vérifier / aligner avec la version du compte.
+			'Authorization' => 'Bearer ' . $secret_key,
 		),
 	);
 
@@ -851,9 +892,11 @@ function annad_sepa_load_gateway_class() {
 					'desc_tip'    => true,
 				),
 				'description' => array(
-					'title'   => 'Description',
-					'type'    => 'textarea',
-					'default' => 'Vous serez prélevé via votre mandat SEPA déjà enregistré, quelques jours après l\'expédition de votre commande.',
+					'title'       => 'Description',
+					'type'        => 'textarea',
+					'description' => 'Texte vu par le client au checkout. « quelques jours » ou le jeton {delai} '
+						. 'sont remplacés automatiquement par le délai applicable au client + 2 jours de délai bancaire.',
+					'default'     => 'Vous serez prélevé via votre mandat SEPA déjà enregistré, {delai} jours après l\'expédition de votre commande.',
 				),
 				'delay_days'  => array(
 					'title'             => 'Délai de prélèvement par défaut (jours)',
@@ -1057,10 +1100,10 @@ function annad_sepa_render_authorization_field( $user ) {
 							$diag['mandat actif choisi'] = '❌ AUCUN (radio <aucun>)';
 						}
 
-						$cus = annad_sepa_resolve_customer_id( $user->ID );
-						$diag['customer Stripe (cus_) résolu'] = $cus ? '✅ ' . esc_html( $cus ) : '❌ INTROUVABLE (ni meta utilisateur, ni commande avec _stripe_customer_id)';
-
 						$mandate = annad_sepa_find_saved_mandate( $user->ID );
+
+						$cus = $mandate ? $mandate['customer'] : annad_sepa_resolve_customer_id( $user->ID );
+						$diag['customer Stripe (cus_) résolu'] = $cus ? '✅ ' . esc_html( $cus ) : '❌ INTROUVABLE (API Stripe, metas et commandes)';
 						$diag['→ RÉSULTAT FINAL (mandat utilisable)'] = $mandate ? '✅ ' . esc_html( wp_json_encode( $mandate ) ) : '❌ false → la passerelle est masquée au checkout';
 						?>
 						<div style="border:1px dashed #d63638;padding:8px;margin-top:10px;font-size:12px;">
@@ -1089,7 +1132,15 @@ function annad_sepa_save_authorization_field( $user_id ) {
 	}
 
 	if ( isset( $_POST['annad_sepa_active_token'] ) ) {
-		update_user_meta( $user_id, ANNAD_SEPA_ACTIVE_TOKEN_META, absint( $_POST['annad_sepa_active_token'] ) );
+		$new_active = absint( $_POST['annad_sepa_active_token'] );
+		$old_active = (int) get_user_meta( $user_id, ANNAD_SEPA_ACTIVE_TOKEN_META, true );
+		update_user_meta( $user_id, ANNAD_SEPA_ACTIVE_TOKEN_META, $new_active );
+
+		// Email au client uniquement quand un IBAN vient d'être validé (pas au
+		// passage à <aucun>, ni si la sélection est inchangée).
+		if ( $new_active && $new_active !== $old_active ) {
+			annad_sepa_notify_iban_validated( $user_id, $new_active );
+		}
 	}
 
 	if ( isset( $_POST['annad_sepa_delay_days'] ) ) {
@@ -1248,6 +1299,175 @@ function annad_sepa_notify_mandate_replaced( $new_token, $old_token ) {
 	wp_mail( $to, $subject, $body );
 }
 
+/* ============================================================
+ * 4septies. EMAILS — AJOUT ET VALIDATION D'IBAN
+ * ============================================================
+ *
+ * 1) Quand un client ajoute un IBAN : email à Annad (validation requise)
+ *    + email au client (demande bien enregistrée).
+ * 2) Quand un admin valide un IBAN (choix du "Mandat actif") : email au client.
+ *
+ * La détection d'ajout compare les tokens SEPA actuels du client à la liste
+ * déjà connue (meta), à chaque affichage de "Mes moyens de paiement" — la page
+ * où WooCommerce redirige systématiquement après un ajout. Le hook standard
+ * woocommerce_payment_token_added est branché en plus : s'il fonctionne sur la
+ * version installée, la notification part immédiatement ; sinon le passage sur
+ * la page prend le relais. La liste connue sert de garde anti-doublon.
+ */
+
+add_action( 'woocommerce_account_payment-methods_endpoint', function () {
+	annad_sepa_check_default_iban( get_current_user_id() );
+}, 1 );
+
+// Bonus si ces hooks fonctionnent sur la version installée : notification immédiate,
+// sans attendre le passage sur la page. Sinon, la page prend le relais.
+add_action( 'woocommerce_payment_token_added', function ( $token_id ) {
+	if ( class_exists( 'WC_Payment_Tokens' ) ) {
+		$token = WC_Payment_Tokens::get( (int) $token_id );
+		if ( $token ) {
+			annad_sepa_check_default_iban( $token->get_user_id() );
+		}
+	}
+} );
+add_action( 'woocommerce_payment_token_set_default', function ( $token_id, $token = null ) {
+	if ( $token && method_exists( $token, 'get_user_id' ) ) {
+		annad_sepa_check_default_iban( $token->get_user_id() );
+	}
+}, 10, 2 );
+
+/**
+ * Token SEPA actuellement "par défaut" du client, ou null.
+ */
+function annad_sepa_get_default_sepa_token( $user_id ) {
+	if ( ! $user_id || ! class_exists( 'WC_Payment_Tokens' ) ) {
+		return null;
+	}
+	foreach ( WC_Payment_Tokens::get_customer_tokens( $user_id ) as $token ) {
+		$is_sepa = ( 'SEPA' === $token->get_type() ) || ( false !== stripos( $token->get_type(), 'sepa' ) );
+		if ( $is_sepa && $token->is_default() ) {
+			return $token;
+		}
+	}
+	return null;
+}
+
+/**
+ * Détecte un CHANGEMENT d'IBAN par défaut (= soumission à validation) et envoie
+ * les emails. Un ajout d'IBAN supplémentaire sans changement de défaut ne
+ * déclenche rien. Si le nouveau défaut est l'IBAN déjà validé par Annad (retour
+ * en arrière du client), rien non plus : il n'y a rien à re-valider.
+ */
+function annad_sepa_check_default_iban( $user_id ) {
+	if ( ! $user_id ) {
+		return;
+	}
+
+	$default = annad_sepa_get_default_sepa_token( $user_id );
+	$known   = (int) get_user_meta( $user_id, ANNAD_SEPA_KNOWN_DEFAULT_META, true );
+
+	if ( ! $default ) {
+		// Plus d'IBAN par défaut (supprimé) : réinitialiser pour re-détecter plus tard.
+		if ( $known ) {
+			update_user_meta( $user_id, ANNAD_SEPA_KNOWN_DEFAULT_META, 0 );
+		}
+		return;
+	}
+
+	if ( (int) $default->get_id() === $known ) {
+		return; // Rien de nouveau.
+	}
+
+	update_user_meta( $user_id, ANNAD_SEPA_KNOWN_DEFAULT_META, (int) $default->get_id() );
+
+	// Déjà validé par Annad → pas de "soumission", inutile de notifier.
+	$active = (int) get_user_meta( $user_id, ANNAD_SEPA_ACTIVE_TOKEN_META, true );
+	if ( (int) $default->get_id() === $active ) {
+		return;
+	}
+
+	$last4 = method_exists( $default, 'get_last4' ) ? $default->get_last4() : '????';
+	annad_sepa_notify_iban_added( $user_id, $last4 );
+}
+
+/**
+ * Emails envoyés à l'ajout d'un IBAN : un à Annad, un au client.
+ */
+function annad_sepa_notify_iban_added( $user_id, $last4 ) {
+	$user = get_userdata( $user_id );
+	if ( ! $user ) {
+		return;
+	}
+
+	// --- Email à Annad : validation requise. ---
+	$to_admin = ANNAD_SEPA_NOTIFY_EMAIL ? ANNAD_SEPA_NOTIFY_EMAIL : get_option( 'admin_email' );
+	wp_mail(
+		$to_admin,
+		'SEPA différé : nouvel IBAN soumis — validation requise sous 72h',
+		sprintf(
+			"Un client vient de soumettre un IBAN à validation (nouvel IBAN par défaut " .
+			"dans « Mes moyens de paiement »).\n\n" .
+			"Client : %s (%s)\nIBAN se terminant par : %s\nDate : %s\n\n" .
+			"Pour le valider comme mandat actif, ouvrez sa fiche utilisateur :\n%s\n\n" .
+			"Le client a été informé qu'une confirmation lui parviendra sous 72h. " .
+			"Tant que l'IBAN n'est pas validé, le prélèvement SEPA différé ne lui est pas proposé.",
+			$user->display_name,
+			$user->user_email,
+			$last4,
+			wp_date( 'd/m/Y à H\hi', time(), new DateTimeZone( 'Europe/Paris' ) ),
+			admin_url( 'user-edit.php?user_id=' . $user_id . '#annad-sepa' )
+		)
+	);
+
+	// --- Email au client : soumission enregistrée. ---
+	wp_mail(
+		$user->user_email,
+		'Votre IBAN a bien été soumis',
+		sprintf(
+			"Bonjour %s,\n\n" .
+			"Votre IBAN se terminant par %s a bien été soumis.\n\n" .
+			"Nous vous confirmerons sa validation par e-mail sous 72h. Une fois validé, " .
+			"vous pourrez régler vos commandes par prélèvement SEPA différé.\n\n" .
+			"Cordialement,\nL'équipe %s",
+			$user->display_name,
+			$last4,
+			get_bloginfo( 'name' )
+		)
+	);
+}
+
+/**
+ * Email envoyé au client quand un admin valide son IBAN (choix du mandat actif).
+ */
+function annad_sepa_notify_iban_validated( $user_id, $token_id ) {
+	$user = get_userdata( $user_id );
+	if ( ! $user || ! class_exists( 'WC_Payment_Tokens' ) ) {
+		return;
+	}
+	$token = WC_Payment_Tokens::get( (int) $token_id );
+	if ( ! $token ) {
+		return;
+	}
+	$last4 = method_exists( $token, 'get_last4' ) ? $token->get_last4() : '????';
+
+	wp_mail(
+		$user->user_email,
+		'Votre IBAN a été validé pour le prélèvement différé',
+		sprintf(
+			"Bonjour %s,\n\n" .
+			"Bonne nouvelle : votre IBAN se terminant par %s a été validé pour le " .
+			"prélèvement SEPA différé.\n\n" .
+			"Vous pouvez désormais choisir « Prélèvement SEPA (différé) » lors de vos " .
+			"commandes : aucun débit à la commande, le prélèvement est déclenché %d jours " .
+			"après l'expédition (comptez ensuite 2-3 jours ouvrés de délai bancaire).\n\n" .
+			"Cordialement,\nL'équipe %s",
+			$user->display_name,
+			$last4,
+			annad_sepa_get_delay_days( $user_id ),
+			get_bloginfo( 'name' )
+		)
+	);
+}
+
 /**
  * Diagnostic visible au checkout (admin/débogage) : explique pourquoi la
  * passerelle SEPA différé est ou non disponible pour l'utilisateur connecté.
@@ -1276,8 +1496,119 @@ function annad_sepa_checkout_diagnostic() {
 	$badge_probe = get_option( 'annad_sepa_badge_probe' );
 	echo 'sonde badge "Mes moyens de paiement" : <code>'
 		. ( $badge_probe ? esc_html( wp_json_encode( $badge_probe ) ) : 'jamais déclenchée — le filtre woocommerce_saved_payment_methods_list ne s\'applique pas sur cette version' )
-		. '</code>';
+		. '</code><br>';
+
+	// Qui filtre les moyens de paiement ? Liste chaque callback accroché à
+	// woocommerce_available_payment_gateways avec son fichier:ligne d'origine —
+	// permet de localiser un plugin/snippet qui masque ou restreint une passerelle.
+	echo '<br><strong>Filtres accrochés à woocommerce_available_payment_gateways :</strong><br>';
+	global $wp_filter;
+	if ( isset( $wp_filter['woocommerce_available_payment_gateways'] ) ) {
+		foreach ( $wp_filter['woocommerce_available_payment_gateways']->callbacks as $priority => $callbacks ) {
+			foreach ( $callbacks as $cb ) {
+				echo '[priorité ' . esc_html( $priority ) . '] <code>'
+					. esc_html( annad_sepa_describe_callback( $cb['function'] ) ) . '</code><br>';
+			}
+		}
+	} else {
+		echo '<code>aucun</code><br>';
+	}
+
+	// Captures à l'exécution : les 5 derniers chargements du checkout, tous
+	// utilisateurs confondus (permet de comparer un compte pro vs admin).
+	echo '<br><strong>Captures à l\'exécution du filtre (5 derniers passages checkout) :</strong><br>';
+	$probe_history = get_option( 'annad_sepa_gateway_filter_probe', array() );
+	if ( is_array( $probe_history ) && $probe_history ) {
+		foreach ( array_reverse( $probe_history ) as $capture ) {
+			echo '— <strong>' . esc_html( wp_date( 'd/m H:i', (int) $capture['time'], new DateTimeZone( 'Europe/Paris' ) ) ) . '</strong>'
+				. ' | user #' . esc_html( $capture['user_id'] )
+				. ' (' . esc_html( $capture['roles'] ?: 'aucun rôle' ) . ')'
+				. '<br>&nbsp;&nbsp;passerelles finales : <code>' . esc_html( $capture['gateways_finaux'] ?: '(aucune)' ) . '</code><br>';
+			foreach ( (array) $capture['callbacks'] as $cb_line ) {
+				echo '&nbsp;&nbsp;<code style="font-size:10px;">' . esc_html( $cb_line ) . '</code><br>';
+			}
+		}
+	} else {
+		echo '<code>aucune capture — recharger le checkout (avec le compte pro notamment)</code><br>';
+	}
 	echo '</div>';
+}
+
+/**
+ * Capture à L'EXÉCUTION du filtre (priorité maximale = passe en dernier) :
+ * enregistre qui était accroché à ce moment-là (y compris les plugins qui
+ * s'enregistrent tardivement), la liste FINALE des passerelles servies, et
+ * l'utilisateur concerné. Conserve les 5 derniers passages front (tous
+ * utilisateurs, donc aussi les comptes pro), consultables dans le diagnostic admin.
+ */
+add_filter( 'woocommerce_available_payment_gateways', 'annad_sepa_capture_gateway_filters', PHP_INT_MAX );
+
+function annad_sepa_capture_gateway_filters( $gateways ) {
+	if ( ! ( defined( 'ANNAD_SEPA_DEBUG' ) && ANNAD_SEPA_DEBUG ) || is_admin() ) {
+		return $gateways;
+	}
+	// Ne tracer que le checkout, pour ne pas polluer avec le panier/mini-panier.
+	if ( ! function_exists( 'is_checkout' ) || ! is_checkout() ) {
+		return $gateways;
+	}
+
+	global $wp_filter;
+	$callbacks = array();
+	if ( isset( $wp_filter['woocommerce_available_payment_gateways'] ) ) {
+		foreach ( $wp_filter['woocommerce_available_payment_gateways']->callbacks as $priority => $cbs ) {
+			foreach ( $cbs as $cb ) {
+				$callbacks[] = '[' . $priority . '] ' . annad_sepa_describe_callback( $cb['function'] );
+			}
+		}
+	}
+
+	$user = wp_get_current_user();
+
+	$history   = get_option( 'annad_sepa_gateway_filter_probe', array() );
+	$history   = is_array( $history ) ? $history : array();
+	$history[] = array(
+		'time'            => time(),
+		'user_id'         => $user->ID,
+		'roles'           => implode( ', ', (array) $user->roles ),
+		'gateways_finaux' => implode( ', ', array_keys( (array) $gateways ) ),
+		'callbacks'       => $callbacks,
+	);
+	update_option( 'annad_sepa_gateway_filter_probe', array_slice( $history, -5 ), false );
+
+	return $gateways;
+}
+
+/**
+ * Décrit un callback WordPress : nom + fichier:ligne d'origine (via réflexion).
+ * Sert au diagnostic pour localiser quel plugin accroche quoi sur un filtre.
+ */
+function annad_sepa_describe_callback( $callback ) {
+	try {
+		if ( is_string( $callback ) && function_exists( $callback ) ) {
+			$ref  = new ReflectionFunction( $callback );
+			$name = $callback . '()';
+		} elseif ( $callback instanceof Closure ) {
+			$ref  = new ReflectionFunction( $callback );
+			$name = '(fonction anonyme)';
+		} elseif ( is_array( $callback ) && 2 === count( $callback ) ) {
+			$class = is_object( $callback[0] ) ? get_class( $callback[0] ) : (string) $callback[0];
+			$ref   = new ReflectionMethod( $class, $callback[1] );
+			$name  = $class . '::' . $callback[1] . '()';
+		} else {
+			return 'callback non identifiable';
+		}
+
+		$file = $ref->getFileName();
+		// Raccourcir le chemin : ne garder qu'à partir de wp-content/ si possible.
+		$pos = strpos( (string) $file, 'wp-content' );
+		if ( false !== $pos ) {
+			$file = substr( $file, $pos );
+		}
+
+		return $name . ' — ' . $file . ':' . $ref->getStartLine();
+	} catch ( Exception $e ) {
+		return 'callback non analysable (' . $e->getMessage() . ')';
+	}
 }
 
 /**
@@ -1317,12 +1648,53 @@ function annad_sepa_find_saved_mandate( $user_id ) {
 		return false;
 	}
 
-	$customer = annad_sepa_resolve_customer_id( $user_id );
+	// Source de vérité : l'API Stripe (à quel customer appartient CE pm_ ?),
+	// avec cache lié au pm_ — si le mandat change (nouvel IBAN, changement de
+	// compte Stripe), le cache est automatiquement invalidé et re-résolu.
+	$customer = annad_sepa_fetch_customer_from_stripe( $pm_id, $user_id );
+	if ( ! $customer ) {
+		// Repli historique (clé API indisponible, etc.) : metas et commandes locales.
+		$customer = annad_sepa_resolve_customer_id( $user_id );
+	}
 	if ( ! $customer ) {
 		return false;
 	}
 
 	return array( 'customer' => $customer, 'payment_method' => $pm_id );
+}
+
+/**
+ * Retrouve via l'API Stripe le customer (cus_...) propriétaire d'un payment
+ * method (pm_...). Cache en meta utilisateur, LIÉ AU pm_ : un changement de
+ * mandat (ou de compte Stripe) invalide le cache au lieu de servir une valeur
+ * périmée d'un autre environnement.
+ */
+function annad_sepa_fetch_customer_from_stripe( $pm_id, $user_id ) {
+	$cached = get_user_meta( $user_id, '_annad_sepa_customer_for_pm', true );
+	if ( is_array( $cached )
+		&& ( $cached['pm'] ?? '' ) === $pm_id
+		&& 0 === strpos( (string) ( $cached['cus'] ?? '' ), 'cus_' )
+	) {
+		return $cached['cus'];
+	}
+
+	$secret_key = annad_sepa_get_secret_key();
+	if ( ! $secret_key ) {
+		return '';
+	}
+
+	$pm = annad_sepa_stripe_request( 'GET', 'payment_methods/' . $pm_id, array(), $secret_key );
+	if ( is_wp_error( $pm ) || empty( $pm['customer'] ) || 0 !== strpos( (string) $pm['customer'], 'cus_' ) ) {
+		return '';
+	}
+
+	$customer = sanitize_text_field( $pm['customer'] );
+	update_user_meta( $user_id, '_annad_sepa_customer_for_pm', array(
+		'pm'  => $pm_id,
+		'cus' => $customer,
+	) );
+
+	return $customer;
 }
 
 /**
@@ -1370,23 +1742,52 @@ function annad_sepa_badge_active_mandate_js() {
 add_action( 'woocommerce_account_payment-methods_endpoint', 'annad_sepa_account_payment_methods_footer_note', 20 );
 
 function annad_sepa_account_payment_methods_footer_note() {
-	$contact = ANNAD_SEPA_CONTACT_EMAIL ? ANNAD_SEPA_CONTACT_EMAIL : get_option( 'admin_email' );
-	echo '<p style="padding-top:10px;">Pour changer d\'IBAN utilisé pour le prélèvement différé, ou en faire valider un second, '
-		. 'merci de nous contacter : <a href="mailto:' . esc_attr( $contact ) . '">' . esc_html( $contact ) . '</a>.</p>';
-
-	// N'afficher le délai qu'aux clients réellement éligibles au prélèvement différé.
 	$user_id = get_current_user_id();
+
+	$default = $user_id ? annad_sepa_get_default_sepa_token( $user_id ) : null;
+	$active  = $user_id ? (int) get_user_meta( $user_id, ANNAD_SEPA_ACTIVE_TOKEN_META, true ) : 0;
+
 	if ( $user_id && annad_sepa_is_authorized( $user_id ) ) {
-		echo '<p>Votre prélèvement SEPA différé est déclenché <strong>'
+		// État 3 — IBAN validé et actif : le badge ✅ figure déjà sur la ligne de
+		// l'IBAN, on affiche l'information de délai applicable.
+		echo '<p style="padding-top:10px;">Votre prélèvement SEPA différé est déclenché <strong>'
 			. esc_html( annad_sepa_get_delay_days( $user_id ) )
 			. ' jours</strong> après l\'expédition de votre commande (comptez ensuite 2-3 jours ouvrés de délai bancaire).</p>';
+	} elseif ( $default && (int) $default->get_id() !== $active ) {
+		// État 2 — un IBAN par défaut est soumis et PAS ENCORE validé par Annad.
+		echo '<p style="padding-top:10px;">✅ Votre IBAN a bien été soumis. '
+			. 'Nous vous confirmerons sa validation par e-mail sous 72h.</p>';
+	} else {
+		// État 1 — aucun IBAN en attente : inviter à en soumettre un.
+		echo '<p style="padding-top:10px;">Paiement SEPA : cliquez ci-dessus sur '
+			. '« Ajouter un moyen de paiement » pour soumettre votre IBAN. '
+			. 'Nous vous confirmerons sa validation par e-mail sous 72h.</p>';
 	}
+
+	// Renomme « Utiliser par défaut » en « Soumettre à validation » sur les lignes
+	// IBAN/SEPA uniquement (les cartes éventuelles gardent le libellé standard) :
+	// le clic sur ce bouton EST la soumission dans notre flux de validation.
+	?>
+	<script>
+	( function () {
+		document.querySelectorAll( '.account-payment-methods-table tr.payment-method' ).forEach( function ( row ) {
+			var method = row.querySelector( '.payment-method-method' );
+			var btn    = row.querySelector( '.payment-method-actions .button.default' );
+			if ( method && btn && /sepa|iban/i.test( method.textContent ) ) {
+				btn.textContent = 'Soumettre à validation';
+			}
+		} );
+	} )();
+	</script>
+	<?php
 }
 
 /**
  * Retrouve l'ID customer Stripe (cus_...) d'un utilisateur.
  */
 function annad_sepa_resolve_customer_id( $user_id ) {
+	// NB : l'ancienne clé de cache '_annad_sepa_customer_id' (v1.6.3) a été retirée
+	// de cette liste — elle pouvait servir une valeur d'un autre compte Stripe.
 	foreach ( array( '_stripe_customer_id', 'stripe_customer_id', 'wp_stripe_customer_id' ) as $meta_key ) {
 		$val = get_user_meta( $user_id, $meta_key, true );
 		if ( $val && 0 === strpos( (string) $val, 'cus_' ) ) {
@@ -1412,6 +1813,26 @@ function annad_sepa_resolve_customer_id( $user_id ) {
 		}
 	}
 	return '';
+}
+
+/**
+ * Description de la passerelle au checkout : remplace « quelques jours » (ou le
+ * jeton {delai}) par le délai réel applicable AU CLIENT CONNECTÉ + 2 jours de
+ * délai bancaire — ex. « … 10 jours après l'expédition de votre commande. »
+ */
+add_filter( 'woocommerce_gateway_description', 'annad_sepa_dynamic_gateway_description', 10, 2 );
+
+function annad_sepa_dynamic_gateway_description( $description, $gateway_id ) {
+	if ( ANNAD_SEPA_GATEWAY_ID !== $gateway_id || is_admin() ) {
+		return $description;
+	}
+
+	$days = annad_sepa_get_delay_days( get_current_user_id() ) + 2;
+
+	$description = str_replace( '{delai}', $days, $description );
+	$description = str_replace( 'quelques jours', $days . ' jours', $description );
+
+	return $description;
 }
 
 /* ============================================================
@@ -1630,6 +2051,176 @@ function annad_sepa_hide_sepa_from_upe_params( $params ) {
 	unset( $config );
 
 	return $params;
+}
+
+/* ============================================================
+ * 4octies. RAPPORT « PRÉLÈVEMENTS SEPA À VENIR »
+ * ============================================================
+ *
+ * Onglet dans WooCommerce → Rapports → Commandes : liste les prélèvements
+ * différés pas encore débités, pour anticiper la trésorerie entrante.
+ * Deux populations :
+ *   - commandes « Terminé » avec prélèvement PLANIFIÉ (date connue) ;
+ *   - commandes payées via la passerelle mais pas encore expédiées
+ *     (date estimée seulement, dépend du passage en « Terminé »).
+ * Les montants et dates de réception sont des ESTIMATIONS (délai bancaire
+ * SEPA ~2-3 jours ouvrés, non vérifiable ici).
+ */
+
+add_filter( 'woocommerce_admin_reports', 'annad_sepa_register_report' );
+
+function annad_sepa_register_report( $reports ) {
+	if ( isset( $reports['orders'] ) ) {
+		$reports['orders']['reports']['annad_sepa_upcoming'] = array(
+			'title'       => 'Prélèvements SEPA à venir',
+			'description' => '',
+			'hide_title'  => true,
+			'callback'    => 'annad_sepa_render_upcoming_report',
+		);
+	}
+	return $reports;
+}
+
+/**
+ * Ajoute N jours OUVRÉS (lun-ven) à un timestamp — pour estimer la date de
+ * réception du crédit après le déclenchement du prélèvement.
+ */
+function annad_sepa_add_business_days( $timestamp, $days ) {
+	while ( $days > 0 ) {
+		$timestamp += DAY_IN_SECONDS;
+		if ( (int) wp_date( 'N', $timestamp ) < 6 ) {
+			$days--;
+		}
+	}
+	return $timestamp;
+}
+
+function annad_sepa_render_upcoming_report() {
+	$rows = array();
+
+	// Option : inclure aussi les commandes pas encore expédiées (masquées par défaut).
+	$show_pending = ! empty( $_GET['annad_sepa_show_pending'] ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+
+	// 1) Prélèvements planifiés (commande « Terminé », date de déclenchement connue).
+	$scheduled_orders = wc_get_orders( array(
+		'limit'        => -1,
+		'meta_key'     => '_annad_sepa_scheduled_ts',
+		'meta_compare' => 'EXISTS',
+	) );
+	foreach ( $scheduled_orders as $order ) {
+		$ts = (int) $order->get_meta( '_annad_sepa_scheduled_ts' );
+		if ( ! $ts || 'yes' === $order->get_meta( '_annad_sepa_done' ) ) {
+			continue;
+		}
+		$rows[ $order->get_id() ] = array(
+			'order'     => $order,
+			'charge_ts' => $ts,
+		);
+	}
+
+	// 2) Optionnel : commandes payées via la passerelle, pas encore expédiées.
+	if ( $show_pending ) {
+		$pending_orders = wc_get_orders( array(
+			'limit'          => -1,
+			'status'         => array( 'on-hold', 'processing' ),
+			'payment_method' => ANNAD_SEPA_GATEWAY_ID,
+		) );
+		foreach ( $pending_orders as $order ) {
+			if ( isset( $rows[ $order->get_id() ] ) || 'yes' === $order->get_meta( '_annad_sepa_done' ) ) {
+				continue;
+			}
+			$rows[ $order->get_id() ] = array(
+				'order'     => $order,
+				'charge_ts' => 0, // Pas encore planifié : dépend du passage en « Terminé ».
+			);
+		}
+	}
+
+	// Tri : planifiés d'abord (par date de prélèvement croissante), puis non planifiés.
+	uasort( $rows, function ( $a, $b ) {
+		if ( $a['charge_ts'] && $b['charge_ts'] ) {
+			return $a['charge_ts'] <=> $b['charge_ts'];
+		}
+		if ( $a['charge_ts'] ) {
+			return -1;
+		}
+		if ( $b['charge_ts'] ) {
+			return 1;
+		}
+		return $b['order']->get_id() <=> $a['order']->get_id();
+	} );
+
+	$total = 0;
+	foreach ( $rows as $row ) {
+		$total += (float) $row['order']->get_total();
+	}
+
+	echo '<div style="padding:20px;">';
+	echo '<h3>Prélèvements SEPA à venir</h3>';
+	echo '<p style="font-size:15px;">Montant total attendu : '
+		. '<strong style="font-size:1.4em;color:#1a7a2e;">' . wp_kses_post( wc_price( $total ) ) . '</strong>'
+		. ' (' . count( $rows ) . ' commande' . ( count( $rows ) > 1 ? 's' : '' ) . ')</p>';
+
+	// Case à cocher : afficher aussi les commandes pas encore expédiées.
+	echo '<form method="get" style="margin:10px 0;">';
+	// Conserver les paramètres de la page de rapports.
+	foreach ( array( 'page', 'tab', 'report' ) as $param ) {
+		if ( isset( $_GET[ $param ] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			echo '<input type="hidden" name="' . esc_attr( $param ) . '" value="'
+				. esc_attr( sanitize_text_field( wp_unslash( $_GET[ $param ] ) ) ) . '">'; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		}
+	}
+	echo '<label><input type="checkbox" name="annad_sepa_show_pending" value="1" '
+		. checked( $show_pending, true, false ) . ' onchange="this.form.submit();"> '
+		. 'Afficher aussi les commandes « en attente » (payées en SEPA différé, pas encore expédiées)</label>';
+	echo '</form>';
+
+	echo '<p class="description">Estimations : la date de réception suppose un délai bancaire SEPA de '
+		. '~3 jours ouvrés après le déclenchement du prélèvement, et n\'est pas vérifiable depuis WooCommerce.'
+		. ( $show_pending ? ' Les commandes non expédiées n\'ont pas encore de date — le délai court à partir du passage en « Terminé ».' : '' )
+		. '</p>';
+
+	if ( ! $rows ) {
+		echo '<p>Aucun prélèvement en attente. 🎉</p></div>';
+		return;
+	}
+
+	echo '<table class="widefat striped" style="max-width:950px;">';
+	echo '<thead><tr>'
+		. '<th>Commande</th>'
+		. '<th>Date de commande</th>'
+		. '<th>Montant</th>'
+		. '<th>Délai</th>'
+		. '<th>Date Prélèvement</th>'
+		. '<th>Date (estimée)</th>'
+		. '</tr></thead><tbody>';
+
+	foreach ( $rows as $row ) {
+		$order = $row['order'];
+		$delay = annad_sepa_get_delay_days( $order->get_user_id() );
+		$url   = $order->get_edit_order_url();
+
+		echo '<tr>';
+		echo '<td><a href="' . esc_url( $url ) . '"><strong>#' . esc_html( $order->get_order_number() ) . '</strong></a><br>'
+			. '<span style="color:#777;">' . esc_html( wc_get_order_status_name( $order->get_status() ) ) . '</span></td>';
+		echo '<td>' . esc_html( $order->get_date_created() ? $order->get_date_created()->date_i18n( 'd/m/Y' ) : '—' ) . '</td>';
+		echo '<td><strong style="font-size:1.15em;color:#1a7a2e;">' . wp_kses_post( wc_price( $order->get_total() ) ) . '</strong></td>';
+		echo '<td>J+' . esc_html( $delay ) . '</td>';
+
+		if ( $row['charge_ts'] ) {
+			$credit_ts = annad_sepa_add_business_days( $row['charge_ts'], 3 );
+			echo '<td>' . esc_html( annad_sepa_format_date( $row['charge_ts'] ) ) . '</td>';
+			echo '<td><strong style="background:#fff3cd;padding:2px 6px;border-radius:3px;">'
+				. esc_html( wp_date( 'd/m/Y', $credit_ts, new DateTimeZone( 'Europe/Paris' ) ) ) . '</strong></td>';
+		} else {
+			echo '<td><em>En attente d\'expédition</em></td>';
+			echo '<td><em>~ expédition + ' . esc_html( $delay ) . ' j + 3 j ouvrés</em></td>';
+		}
+
+		echo '</tr>';
+	}
+
+	echo '</tbody></table></div>';
 }
 
 /* ============================================================
