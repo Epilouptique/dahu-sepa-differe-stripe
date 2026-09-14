@@ -148,22 +148,31 @@ if ( ! defined( 'ANNAD_SEPA_WEBHOOK_SECRET' ) ) {
  * PAGE EXTENSIONS WORDPRESS — LIENS D'ACTION & MÉTA
  * ============================================================ */
 
+/**
+ * Libellé « Version x.y.z », lu depuis l'en-tête de ce fichier pour rester
+ * toujours synchronisé avec lui (aucun numéro à maintenir à la main ailleurs).
+ * « Version %s » est une chaîne du cœur WordPress, donc déjà traduite.
+ */
+function annad_sepa_plugin_version_label() {
+	$header = get_file_data( __FILE__, array( 'Version' => 'Version' ) );
+	/* translators: %s: plugin version. */
+	return sprintf( __( 'Version %s' ), $header['Version'] );
+}
+
+// Liens d'action, avant « Désactiver » : version puis « Réglages » en tête.
 add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), function ( $links ) {
 	$settings = '<a href="' . admin_url( 'admin.php?page=wc-settings&tab=checkout&section=' . ANNAD_SEPA_GATEWAY_ID ) . '">'
 		. __( 'Réglages', 'dahu-sepa-differe-stripe' ) . '</a>';
-	array_unshift( $links, $settings );
+	array_unshift( $links, annad_sepa_plugin_version_label(), $settings );
 	return $links;
 } );
 
 add_filter( 'plugin_row_meta', function ( $links, $file ) {
 	if ( plugin_basename( __FILE__ ) === $file ) {
 		// On remplace les méta par défaut de WordPress, ce qui supprimerait aussi
-		// « Version x.y.z » : on la remet en tête, lue depuis l'en-tête du fichier
-		// pour rester toujours synchronisée avec lui.
-		$header = get_file_data( __FILE__, array( 'Version' => 'Version' ) );
-		$links  = array(
-			/* translators: %s: plugin version. Chaîne du cœur WordPress, déjà traduite. */
-			sprintf( __( 'Version %s' ), $header['Version'] ),
+		// « Version x.y.z » : on la remet en tête.
+		$links = array(
+			annad_sepa_plugin_version_label(),
 			'Par Hugo Vial-Jaime — Dahu-Concept',
 			'<a href="https://github.com/Epilouptique" target="_blank">Aller sur le site de l\'extension</a>',
 			'<a href="https://github.com/Epilouptique/dahu-sepa-differe-stripe" target="_blank">Documentation</a>',

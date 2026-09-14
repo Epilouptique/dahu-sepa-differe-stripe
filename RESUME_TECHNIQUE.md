@@ -285,6 +285,11 @@ via `get_file_data( __FILE__ )` pour ne jamais avoir à la maintenir à deux
 endroits. Piège à reproduire à l'identique sur les autres plugins Dahu qui
 suivent le même modèle de ligne méta.
 
+Dans la foulée, la version a aussi été ajoutée aux **liens d'action** (à côté de
+« Désactiver »), en tête et avant « Réglages », comme l'exige la charte Dahu. Les
+deux emplacements passent par `annad_sepa_plugin_version_label()`, seule source
+du libellé.
+
 ---
 
 ## 6. Checklist de validation (mode test Stripe)
