@@ -22,3 +22,6 @@ vendor/
 node_modules/
 
 .claude/
+
+# Dossier de build temporaire créé par build.sh
+/dahu-sepa-differe-stripe/
