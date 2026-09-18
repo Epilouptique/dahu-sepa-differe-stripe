@@ -3,7 +3,7 @@
  * Plugin Name: Dahu - Sepa Differe Stripe
  * Plugin URI:  https://github.com/Epilouptique/dahu-sepa-differe-stripe
  * Description: Déclenche automatiquement le prélèvement SEPA Stripe un nombre de jours configurable après le passage d'une commande en "Terminé", en réutilisant le mandat déjà enregistré du client. La date de déclenchement est modifiable depuis la fiche commande.
- * Version:     1.7.2
+ * Version:     1.7.3
  * Author:      Hugo Vial-Jaime
  * Author URI:  mailto:hugo@vialjaime.fr
  * License:     GPL v2 or later
@@ -70,6 +70,10 @@ define( 'ANNAD_SEPA_GATEWAY_ID', 'annad_sepa_deferred' );
 // IDs de gateway reconnus par l'extension : notre passerelle dédiée + les IDs SEPA
 // du plugin officiel (conservés pour compatibilité / anciennes commandes).
 define( 'ANNAD_SEPA_GATEWAYS', array( ANNAD_SEPA_GATEWAY_ID, 'stripe_sepa', 'stripe_sepa_debit' ) );
+
+// IDs du SEPA NATIF du plugin Stripe officiel (débit immédiat). Masqués au checkout
+// et non sélectionnables sur l'écran d'édition d'une commande en back-office.
+define( 'ANNAD_SEPA_NATIVE_GATEWAYS', array( 'stripe_sepa_debit', 'stripe_sepa' ) );
 
 // Hook de l'action planifiée.
 define( 'ANNAD_SEPA_HOOK', 'annad_sepa_confirm_payment' );
@@ -1876,10 +1880,81 @@ function annad_sepa_hide_native_sepa_gateway( $gateways ) {
 		return $gateways;
 	}
 
-	unset( $gateways['stripe_sepa_debit'] );
-	unset( $gateways['stripe_sepa'] );
+	foreach ( ANNAD_SEPA_NATIVE_GATEWAYS as $native_id ) {
+		unset( $gateways[ $native_id ] );
+	}
 
 	return $gateways;
+}
+
+/* ============================================================
+ * 4sexies-bis. MASQUER LE SEPA NATIF DANS LE SELECT « MOYEN DE PAIEMENT »
+ *              DE L'ÉCRAN COMMANDE (BACK-OFFICE)
+ * ============================================================
+ *
+ * Ce select n'utilise PAS woocommerce_available_payment_gateways : il est construit
+ * par WC_Meta_Box_Order_Data::output() à partir de TOUTES les passerelles
+ * enregistrées et activées (WC()->payment_gateways->payment_gateways()), sans
+ * filtre dédié. Même méta-box en HPOS et en legacy.
+ *
+ * Désactiver la passerelle le temps de l'affichage ferait afficher « Autre » sur les
+ * commandes historiques payées en SEPA natif. D'où deux niveaux :
+ *   1. affichage : un script retire l'option, SAUF si c'est le moyen de paiement
+ *      actuel de la commande (commandes historiques : valeur et libellé conservés) ;
+ *   2. verrou serveur : toute bascule VERS le SEPA natif est refusée à
+ *      l'enregistrement, même si le script est contourné.
+ */
+
+add_action( 'admin_footer', 'annad_sepa_hide_native_sepa_in_order_screen' );
+
+function annad_sepa_hide_native_sepa_in_order_screen() {
+	$screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+	if ( ! $screen || ! in_array( $screen->id, array( 'woocommerce_page_wc-orders', 'shop_order' ), true ) ) {
+		return;
+	}
+	?>
+	<script>
+	jQuery( function ( $ ) {
+		var nativeIds = <?php echo wp_json_encode( ANNAD_SEPA_NATIVE_GATEWAYS ); ?>;
+		var $select   = $( '#_payment_method' );
+		$select.find( 'option' ).each( function () {
+			// On garde l'option si c'est le moyen de paiement actuel de la commande.
+			if ( -1 !== nativeIds.indexOf( this.value ) && ! this.defaultSelected ) {
+				$( this ).remove();
+			}
+		} );
+		$select.trigger( 'change.select2' );
+	} );
+	</script>
+	<?php
+}
+
+// Priorité 5 : avant WC_Meta_Box_Order_Data::save() (priorité 40), qui lit $_POST.
+add_action( 'woocommerce_process_shop_order_meta', 'annad_sepa_block_native_sepa_selection', 5, 2 );
+
+function annad_sepa_block_native_sepa_selection( $order_id, $order = null ) {
+	if ( empty( $_POST['_payment_method'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Missing -- nonce vérifié par WooCommerce en amont.
+		return;
+	}
+	$requested = wc_clean( wp_unslash( $_POST['_payment_method'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Missing
+	if ( ! in_array( $requested, ANNAD_SEPA_NATIVE_GATEWAYS, true ) ) {
+		return;
+	}
+
+	$order   = $order instanceof WC_Order ? $order : wc_get_order( $order_id );
+	$current = $order ? $order->get_payment_method() : '';
+	if ( $requested === $current ) {
+		return; // Commande historique déjà en SEPA natif : rien ne change.
+	}
+
+	// Bascule vers le SEPA natif refusée : on conserve le moyen de paiement actuel.
+	$_POST['_payment_method'] = $current;
+	if ( class_exists( 'WC_Admin_Meta_Boxes' ) ) {
+		WC_Admin_Meta_Boxes::add_error(
+			'Le « Prélèvement SEPA Direct » natif de Stripe ne peut pas être choisi sur une commande : '
+			. 'utilisez « Prélèvement SEPA différé ». Le moyen de paiement n\'a pas été modifié.'
+		);
+	}
 }
 
 /* ============================================================

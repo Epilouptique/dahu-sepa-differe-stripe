@@ -192,6 +192,46 @@ Paramètres avancés, l'option **« Activer la suite de paiement optimisée »**
 façon fiable et vérifiable (en mode OC, seule la piste `enabledPaymentMethods` a
 été implémentée mais n'a pas pu être validée visuellement lors du développement).
 
+### 4.1 Le select « Moyen de paiement » de l'écran commande (back-office)
+
+Masquer le SEPA natif au checkout ne suffit pas : lors de la création ou de la
+modification manuelle d'une commande, le select `_payment_method` proposait
+toujours « Prélèvement SEPA Direct » (`stripe_sepa_debit`). Un admin pouvait le
+choisir par erreur à la place de la passerelle différée. Retiré en 1.7.3.
+
+**Piège : ce select n'utilise PAS `woocommerce_available_payment_gateways`.** Il
+est construit par `WC_Meta_Box_Order_Data::output()`, qui parcourt **toutes** les
+passerelles enregistrées (`WC()->payment_gateways->payment_gateways()`) et
+affiche celles dont `enabled === 'yes'`. Aucun filtre n'agit sur cette liste.
+C'est la même méta-box en HPOS (`woocommerce_page_wc-orders`) et en legacy
+(`shop_order`), et la sauvegarde passe dans les deux cas par
+`woocommerce_process_shop_order_meta` (`WC_Meta_Box_Order_Data::save()` à la
+priorité 40).
+
+Pistes écartées :
+- **Désinscrire la passerelle en admin** (`woocommerce_payment_gateways`) : casse
+  ses réglages et le **remboursement** des commandes historiques depuis l'admin,
+  qui a besoin de l'objet passerelle.
+- **Passer `enabled` à `no` le temps de l'affichage** : WooCommerce affiche alors
+  « Autre » au lieu de « Prélèvement SEPA Direct » sur les commandes historiques.
+
+Solution retenue, en deux niveaux :
+1. **Affichage** (`annad_sepa_hide_native_sepa_in_order_screen()`, `admin_footer`) :
+   un script retire les options `ANNAD_SEPA_NATIVE_GATEWAYS` du select, **sauf
+   celle déjà sélectionnée** (`defaultSelected`). Une commande historique en SEPA
+   natif garde donc sa valeur et son vrai libellé.
+2. **Verrou serveur** (`annad_sepa_block_native_sepa_selection()`,
+   `woocommerce_process_shop_order_meta` priorité 5, donc avant WooCommerce) :
+   toute bascule **vers** un SEPA natif est annulée en remettant le moyen de
+   paiement actuel dans `$_POST`, avec un message d'erreur via
+   `WC_Admin_Meta_Boxes::add_error()`. Fonctionne même si le script est contourné
+   (JS désactivé, requête forgée).
+
+Précision : choisir ce moyen de paiement en back-office **ne débite rien** par
+lui-même. WooCommerce enregistre juste l'identifiant, sans appeler Stripe. Le
+risque réel est une commande mal étiquetée, sans les meta Stripe (`_stripe_*`)
+que le prélèvement à J+N attend, et qui sortirait donc du circuit différé.
+
 ---
 
 ## 5. Autres bugs historiques et pièges rencontrés

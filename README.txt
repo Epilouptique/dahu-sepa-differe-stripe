@@ -5,7 +5,7 @@ Requires at least: 6.0
 Tested up to: 6.7
 Requires PHP: 7.4
 WC requires at least: 7.0
-Stable tag: 1.7.2
+Stable tag: 1.7.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -85,9 +85,14 @@ default payment method.
 
 == Changelog ==
 
+= 1.7.3 =
+* Stripe's native (immediate) SEPA Direct Debit gateway can no longer be selected as the payment method when creating or editing an order in the admin. Orders that already use it keep it, with its label. Enforced server-side on save, on both HPOS and legacy order screens.
+* The plugin version is no longer shown in the plugin action links; it stays in the plugin row meta.
+
 = 1.7.2 =
 * Removed a store-specific migration rule that hid the "Cash on delivery" gateway from authorized customers at checkout. Cash on delivery is no longer affected by this plugin.
 * Restored the plugin version ("Version x.y.z") at the start of the plugin row meta on the Plugins screen; the custom row meta was dropping it.
+
 = 1.7.1 =
 * The "Charge now" button on the order screen is always available, no longer only in debug mode. The action itself stays protected by capability check and nonce.
 
